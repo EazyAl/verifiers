@@ -1,0 +1,55 @@
+name: Validate MCP startup
+
+on:
+  push:
+    branches: [codex/validate-mcp-startup]
+
+permissions:
+  contents: read
+
+jobs:
+  local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v10.0.1
+      - run: uv sync --frozen
+      - run: mkdir -p ../verifiers-audit
+      - run: uv run --no-sync pytest tests/unit --runtime subprocess -o addopts= -q
+      - run: uv run --no-sync python .scratch/validation/check_startup_design.py > ../verifiers-audit/matrix.jsonl
+      - run: uv run --no-sync python .scratch/validation/check_occupied_port.py > ../verifiers-audit/occupied-port.jsonl
+      - run: uv run --no-sync python .scratch/validation/check_eval_failure.py > ../verifiers-audit/eval.jsonl
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: startup-python-${{ matrix.python }}
+          path: ../verifiers-audit
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v10.0.1
+      - run: uv sync --frozen
+      - run: mkdir -p ../verifiers-audit
+      - run: uv run --no-sync python .scratch/validation/check_remote.py --runtime docker | tee ../verifiers-audit/docker.jsonl
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: startup-docker
+          path: ../verifiers-audit

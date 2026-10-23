@@ -1,0 +1,12 @@
+[project]
+name = "vf-startup-audit-fixture"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = ["verifiers"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["startup_fixture.py", "pyproject.toml"]
