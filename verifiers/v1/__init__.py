@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         RubricJudgeConfig,
     )
     from verifiers.v1.mcp import SharedToolsetConfig, Toolset, ToolsetConfig
+    from verifiers.v1.outage_probe import ProbeCheck, ProbeReport, ProbeStatus, probe
     from verifiers.v1.runtimes import (
         ProgramResult,
         Runtime,
@@ -268,6 +269,9 @@ _NAME_TO_MODULE = {
     "PolicyEvent": "verifiers.v1.trace",
     "PolicySpan": "verifiers.v1.episode",
     "PrimeConfig": "verifiers.v1.configs.runtime",
+    "ProbeCheck": "verifiers.v1.outage_probe",
+    "ProbeReport": "verifiers.v1.outage_probe",
+    "ProbeStatus": "verifiers.v1.outage_probe",
     "ProgramResult": "verifiers.v1.runtimes",
     "ProviderError": "verifiers.v1.errors",
     "ReferenceJudge": "verifiers.v1.judges",
@@ -372,6 +376,7 @@ _NAME_TO_MODULE = {
     "parse_judge_choice": "verifiers.v1.utils.score",
     "parse_pytest_outcomes": "verifiers.v1.utils.score",
     "pool_serve_kwargs": "verifiers.v1.configs.serve",
+    "probe": "verifiers.v1.outage_probe",
     "read_answer_file_or_last_reply": "verifiers.v1.utils.score",
     "resolve_client": "verifiers.v1.clients",
     "resolve_env_config": "verifiers.v1.utils.loaders",
@@ -471,6 +476,10 @@ __all__ = [  # noqa: RUF022 - grouped by public API area
     "TunnelError",
     "OutageKind",
     "outage_kind",
+    "ProbeCheck",
+    "ProbeReport",
+    "ProbeStatus",
+    "probe",
     # clients
     "Client",
     "BaseClientConfig",
