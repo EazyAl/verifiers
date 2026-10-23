@@ -106,9 +106,26 @@ async def one_case(module, base, mode, *, user=False, exposed=False):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-        with contextlib.suppress(Exception):
+        try:
             identity = json.loads(await runtime.read(identity_path))
-            await base.run(["kill", "-TERM", str(identity["pid"])], {})
+        except Exception:
+            if outcome.get("passed"):
+                raise
+        else:
+            stopped = await base.run(
+                [
+                    "sh",
+                    "-c",
+                    'kill -TERM "$1"',
+                    "vf-startup-audit",
+                    str(identity["pid"]),
+                ],
+                {},
+            )
+            if stopped.exit_code:
+                # A crashed server may already be gone. Healthy servers must
+                # actually be stopped before another fixed-port case starts.
+                assert mode not in {"healthy", "slow", "hang"}, stopped.stderr
         await asyncio.sleep(0.5)
 
 
