@@ -59,17 +59,105 @@ _PACKAGE_BUILD_STATES: dict[
     tuple[Path, asyncio.AbstractEventLoop], _PackageBuildState
 ] = {}
 
-# Any HTTP response, including MCP's 406 to a bare GET, proves the server is listening.
-_PROBE = """
-import sys, time, urllib.error, urllib.request
-for _ in range(180):
+# Run in the server's own interpreter: imports and setup can fail before it has
+# reported a port. Keep its PID and parent unchanged, including for detached jobs.
+_SERVER = r"""
+import contextlib, os, runpy, sys
+module, status = sys.argv[1:]
+sys.argv = [module]
+def record(kind, value):
+    with open(status, "a") as file:
+        print(kind, value, file=file, flush=True)
+record("pid", os.getpid())
+code = 0
+try:
+    runpy.run_module(module, run_name="__main__", alter_sys=True)
+except SystemExit as error:
+    code = error.code if isinstance(error.code, int) else int(error.code is not None)
+    code %= 256
+    if error.code is not None and not isinstance(error.code, int):
+        print(error.code, file=sys.stderr)
+except BaseException as error:
+    code = 130 if isinstance(error, KeyboardInterrupt) else 1
+    sys.excepthook(*sys.exc_info())
+finally:
+    with contextlib.suppress(OSError):
+        # Publish failure only after the diagnostic is available to log_tail.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        record("exit", code)
+sys.exit(code)
+"""
+
+# All polling stays inside the runtime, including for an OS-assigned port, so
+# a detached server needs neither an attached stream nor a host RPC per poll.
+# A launch-specific response proves that this server, rather than an unrelated
+# HTTP listener on the same port, is ready.
+_PROBE = r"""
+import contextlib, os, sys, time, urllib.error, urllib.request
+from pathlib import Path
+fixed, port_file, status_file, token = sys.argv[1:]
+status = Path(status_file)
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+def state():
+    lines = [line for line in status.read_text().splitlines(keepends=True) if line.endswith("\n")]
+    return lines[-1].split() if lines else []
+def check_exit():
+    current = state()
+    if not current:
+        return
+    kind, value = current
+    if kind == "exit":
+        fail(f"server exited with code {value} before it was ready")
+    if os.name != "posix":
+        return
+    pid = int(value)
+    dead = False
     try:
-        urllib.request.urlopen(sys.argv[1], timeout=2); sys.exit(0)
-    except urllib.error.HTTPError:
-        sys.exit(0)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        dead = True
+    except PermissionError:
+        pass
+    # A detached Linux process can remain as a zombie until its parent reaps it.
+    with contextlib.suppress(OSError, IndexError):
+        dead |= Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    if dead:
+        # The exit record may have been written just after the first read.
+        current = state()
+        if current and current[0] == "exit":
+            fail(f"server exited with code {current[1]} before it was ready")
+        fail("server exited before it was ready; no exit code was recorded")
+port = None
+for _ in range(180):
+    check_exit()
+    with contextlib.suppress(OSError):
+        value = Path(port_file).read_text().strip()
+        if value.isdigit():
+            port = int(value)
+    if port is not None:
+        if fixed and port != int(fixed):
+            fail(f"server reported port {port}, expected {fixed}")
+        break
+    time.sleep(1)
+else:
+    fail(f"server did not report its port at {port_file}")
+for _ in range(180):
+    check_exit()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/__vf_ready", timeout=2) as response:
+            ready = response.read(len(token) + 1) == token.encode()
     except Exception:
+        ready = False
+    if not ready:
         time.sleep(1)
-sys.exit(1)
+        continue
+    check_exit()
+    print(port)
+    sys.exit(0)
+fail("server did not answer its startup probe")
 """
 
 
@@ -319,17 +407,6 @@ async def log_tail(runtime: Runtime, log: str, limit: int = 2000) -> str:
     return ""
 
 
-async def _read_back_port(runtime: Runtime, path: str) -> int:
-    """Poll the server's port file until the server writes it."""
-    for _ in range(180):
-        with contextlib.suppress(Exception):
-            data = (await runtime.read(path)).decode().strip()
-            if data.isdigit():
-                return int(data)
-        await asyncio.sleep(1)
-    raise ToolsetError(f"server did not report its port at {path} in its runtime")
-
-
 async def serve_in_runtime(
     server: ServerBase,
     runtime: Runtime,
@@ -359,16 +436,26 @@ async def serve_in_runtime(
     if listen_all or (exposed and runtime.published_port is not None):
         env["MCP_HOST"] = "0.0.0.0"
     fixed = runtime.published_port if exposed else None
-    port_file = None
     if fixed is not None:
         env["MCP_PORT"] = str(fixed)
-    else:
-        port_file = f"/tmp/vf-port-{uuid.uuid4().hex}"
-        env["MCP_PORT_FILE"] = port_file
     python = sys.executable
     if runtime.type != "subprocess":
         python = await _install_in_sandbox(server, runtime)
-    command = [python, "-m", type(server).__module__]
+    log = f"vf_tool_{server.server_name}.log"
+    if runtime.user is not None:
+        # The agent user may not be able to write the workdir.
+        log = f"/tmp/vf_tool_{server.server_name}-{uuid.uuid4().hex[:8]}.log"
+    # Like the log, this belongs to the runtime and lasts until its teardown.
+    # A separate nonce prevents a previous launch's exit from failing this one.
+    token = uuid.uuid4().hex
+    status = f"{log}.{token}.status"
+    port_file = f"{status}.port"
+    # Even a fixed port must have been bound by this launch before probing it:
+    # an unrelated listener is not evidence that this server started.
+    env["MCP_PORT_FILE"] = port_file
+    env["VF_MCP_STARTUP_TOKEN"] = token
+    await runtime.write(status, b"")
+    command = [python, "-c", _SERVER, type(server).__module__, status]
     if runtime.type != "subprocess":
         # Providers may invoke uv after the install shell exits, so preserve its PATH.
         path = "$HOME/.local/bin:$PATH"
@@ -379,26 +466,27 @@ async def serve_in_runtime(
             "-c",
             f'export PATH="{path}"; exec {shlex.join(command)}',
         ]
-    log = f"vf_tool_{server.server_name}.log"
-    if runtime.user is not None:
-        # The agent user may not be able to write the workdir.
-        log = f"/tmp/vf_tool_{server.server_name}-{uuid.uuid4().hex[:8]}.log"
     await runtime.run_background(command, env, log)
-    if fixed is not None:
-        port = fixed
-    else:
-        try:
-            port = await _read_back_port(runtime, port_file)
-        except ToolsetError as e:
-            raise ToolsetError(f"{e}: {await log_tail(runtime, log)}") from e
     probe = await runtime.run(
-        [python, "-c", _PROBE, f"http://127.0.0.1:{port}/mcp"], {}
+        [
+            python,
+            "-c",
+            _PROBE,
+            str(fixed) if fixed is not None else "",
+            port_file,
+            status,
+            token,
+        ],
+        {},
     )
     if probe.exit_code != 0:
-        raise ToolsetError(
-            f"tool server {server.server_name!r} not serving in runtime: {await log_tail(runtime, log)}"
+        message = (
+            f"tool server {server.server_name!r} failed to start: "
+            f"{probe.stderr.strip()}: {await log_tail(runtime, log)}"
         )
-    return port
+        logger.error("%s", message)
+        raise ToolsetError(message)
+    return int(probe.stdout.strip())
 
 
 @contextlib.asynccontextmanager

@@ -315,7 +315,28 @@ class ServerBase(Generic[ConfigT, StateT]):
                         transport_security=security,
                     )
 
+                    startup_token = os.environ.get("VF_MCP_STARTUP_TOKEN")
+
                     async def app(scope, receive, send):
+                        if (
+                            startup_token
+                            and scope["type"] == "http"
+                            and scope["path"] == "/__vf_ready"
+                        ):
+                            await send(
+                                {
+                                    "type": "http.response.start",
+                                    "status": 200,
+                                    "headers": [],
+                                }
+                            )
+                            await send(
+                                {
+                                    "type": "http.response.body",
+                                    "body": startup_token.encode(),
+                                }
+                            )
+                            return
                         query = (
                             parse_qs(
                                 scope.get("query_string", b"").decode(),
